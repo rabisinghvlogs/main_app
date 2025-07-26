@@ -1,0 +1,102 @@
+name: Sign Decompiled APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_b64:
+        description: 'Base64-encoded config.json'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install apktool and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget zipalign apksigner jq xmlstarlet
+          wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
+          wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
+          chmod +x apktool
+          sudo mv apktool apktool.jar /usr/local/bin/
+
+      - name: Decompile APK
+        run: |
+          apktool d main_app.apk -o decompiled_app --force
+
+      - name: Remove META-INF
+        run: |
+          rm -rf decompiled_app/original/META-INF || true
+          rm -rf decompiled_app/META-INF || true
+
+      - name: Inject config.json and extract values
+        id: config
+        run: |
+          mkdir -p decompiled_app/assets/flutter_assets/assets
+          echo "${{ github.event.inputs.config_b64 }}" | base64 -d > decompiled_app/assets/flutter_assets/assets/config.json
+          
+          # Extract values
+          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
+          app_title=$(jq -r '.appTitle' decompiled_app/assets/flutter_assets/assets/config.json)
+
+          echo "APP_ID=$app_id" >> $GITHUB_ENV
+          echo "APP_TITLE=$app_title" >> $GITHUB_ENV
+          
+          echo "Extracted appID: $app_id"
+          echo "Extracted appTitle: $app_title"
+
+      - name: Modify app name in AndroidManifest.xml
+        run: |
+          if [ -f decompiled_app/AndroidManifest.xml ]; then
+            echo "Modifying AndroidManifest.xml..."
+            xmlstarlet ed --inplace \
+              -N android="http://schemas.android.com/apk/res/android" \
+              -u "/manifest/application/@android:label" \
+              -v "$APP_TITLE" decompiled_app/AndroidManifest.xml
+          else
+            echo "AndroidManifest.xml not found!"
+            exit 1
+          fi
+
+      - name: Rebuild APK
+        run: |
+          apktool b decompiled_app -o unsigned.apk
+
+      - name: Zipalign APK
+        run: |
+          zipalign -p -f 4 unsigned.apk aligned.apk
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > appvly.jks
+
+      - name: Sign APK
+        run: |
+          apksigner sign \
+            --ks appvly.jks \
+            --ks-key-alias ${{ secrets.KEY_ALIAS }} \
+            --ks-pass pass:${{ secrets.KEYSTORE_PASS }} \
+            --key-pass pass:${{ secrets.KEY_PASS }} \
+            --out final.apk \
+            aligned.apk
+
+      - name: Verify APK Signature
+        run: |
+          apksigner verify final.apk
+
+      - name: Upload APK to your server
+        run: |
+          curl -X POST "${{ secrets.UPLOAD_SITE }}" \
+            -F "file=@final.apk" \
+            -F "token=${{ secrets.UPLOAD_TOKEN }}" \
+            -F "appID=$APP_ID"
