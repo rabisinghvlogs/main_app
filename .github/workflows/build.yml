@@ -99,4 +99,4 @@ jobs:
           curl -X POST "${{ secrets.UPLOAD_SITE }}" \
             -F "file=@final.apk" \
             -F "token=${{ secrets.UPLOAD_TOKEN }}" \
-            -F "appID=$APP_ID"
+            -F "appID=${{ env.APP_ID }}"
