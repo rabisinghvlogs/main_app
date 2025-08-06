@@ -46,13 +46,9 @@ jobs:
           echo "${{ github.event.inputs.config_b64 }}" | base64 -d > decompiled_app/assets/flutter_assets/assets/config.json
           
           # Extract values
-          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
           app_title=$(jq -r '.appTitle' decompiled_app/assets/flutter_assets/assets/config.json)
 
-          echo "APP_ID=$app_id" >> $GITHUB_ENV
           echo "APP_TITLE=$app_title" >> $GITHUB_ENV
-          
-          echo "Extracted appID: $app_id"
           echo "Extracted appTitle: $app_title"
 
       - name: Modify app name in AndroidManifest.xml
@@ -96,7 +92,10 @@ jobs:
 
       - name: Upload APK to your server
         run: |
+          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
+          echo "Using app_id: $app_id"
+
           curl -X POST "${{ secrets.UPLOAD_SITE }}" \
             -F "file=@final.apk" \
             -F "token=${{ secrets.UPLOAD_TOKEN }}" \
-            -F "appID=${{ env.APP_ID }}"
+            -F "appID=$app_id"
