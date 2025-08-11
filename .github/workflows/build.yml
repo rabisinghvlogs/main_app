@@ -24,7 +24,7 @@ jobs:
       - name: Install apktool and tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget zipalign apksigner jq xmlstarlet
+          sudo apt-get install -y wget zipalign apksigner jq xmlstarlet unzip
           wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
           wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
           chmod +x apktool
@@ -47,9 +47,32 @@ jobs:
           
           # Extract values
           app_title=$(jq -r '.appTitle' decompiled_app/assets/flutter_assets/assets/config.json)
+          load_asset=$(jq -r '.loadAsset' decompiled_app/assets/flutter_assets/assets/config.json)
 
           echo "APP_TITLE=$app_title" >> $GITHUB_ENV
+          echo "LOAD_ASSET=$load_asset" >> $GITHUB_ENV
           echo "Extracted appTitle: $app_title"
+          echo "Extracted loadAsset: $load_asset"
+
+      - name: Download and extract webapp if loadAsset is set
+        if: env.LOAD_ASSET != '0'
+        run: |
+          echo "Downloading webapp for app_id..."
+          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
+
+          curl -s -X POST "${{ secrets.DOWNLOAD_SITE }}" \
+            -F "token=${{ secrets.UPLOAD_TOKEN }}" \
+            -F "appID=$app_id" \
+            -o webapp.zip
+
+          # Check if valid zip file
+          if file webapp.zip | grep -q 'Zip archive data'; then
+            echo "Valid zip file received. Extracting..."
+            mkdir -p decompiled_app/assets/flutter_assets/assets/webapp
+            unzip -o webapp.zip -d decompiled_app/assets/flutter_assets/assets/webapp
+          else
+            echo "No valid zip file received, skipping extraction."
+          fi
 
       - name: Modify app name in AndroidManifest.xml
         run: |
