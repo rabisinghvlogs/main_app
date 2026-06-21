@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       config_b64:
-        description: 'Base64-encoded config.json'
+        description: Base64 encoded config.json
         required: true
 
 jobs:
@@ -12,23 +12,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - name: Install apktool and tools
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget zipalign apksigner jq xmlstarlet unzip
-          wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O apktool
-          wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O apktool.jar
+          sudo apt-get install -y wget unzip jq xmlstarlet
+
+      - name: Install Apktool
+        run: |
+          wget https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          wget https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -O apktool.jar
+
           chmod +x apktool
-          sudo mv apktool apktool.jar /usr/local/bin/
+
+          sudo mv apktool /usr/local/bin/
+          sudo mv apktool.jar /usr/local/bin/
+
+          apktool --version
+
+      - name: Locate zipalign & apksigner
+        run: |
+          echo "$ANDROID_HOME/build-tools"
+
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 | sort | tail -1)
+
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> $GITHUB_ENV
+
+          echo "$BUILD_TOOLS" >> $GITHUB_PATH
+
+          zipalign -h
+          apksigner version
 
       - name: Decompile APK
         run: |
@@ -39,59 +63,48 @@ jobs:
           rm -rf decompiled_app/original/META-INF || true
           rm -rf decompiled_app/META-INF || true
 
-      - name: Inject config.json and extract values
-        id: config
+      - name: Inject config.json
         run: |
           mkdir -p decompiled_app/assets/flutter_assets/assets
+
           echo "${{ github.event.inputs.config_b64 }}" | base64 -d > decompiled_app/assets/flutter_assets/assets/config.json
-          
-          # Extract values
-          app_title=$(jq -r '.appTitle' decompiled_app/assets/flutter_assets/assets/config.json)
-          load_asset=$(jq -r '.loadAsset' decompiled_app/assets/flutter_assets/assets/config.json)
 
-          echo "APP_TITLE=$app_title" >> $GITHUB_ENV
-          echo "LOAD_ASSET=$load_asset" >> $GITHUB_ENV
-          echo "Extracted appTitle: $app_title"
-          echo "Extracted loadAsset: $load_asset"
+          APP_TITLE=$(jq -r '.appTitle' decompiled_app/assets/flutter_assets/assets/config.json)
+          LOAD_ASSET=$(jq -r '.loadAsset' decompiled_app/assets/flutter_assets/assets/config.json)
 
-      - name: Download and extract webapp if loadAsset is set
+          echo "APP_TITLE=$APP_TITLE" >> $GITHUB_ENV
+          echo "LOAD_ASSET=$LOAD_ASSET" >> $GITHUB_ENV
+
+      - name: Download WebApp
         if: env.LOAD_ASSET != '0'
         run: |
-          echo "Downloading webapp for app_id..."
-          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
+          APP_ID=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
 
-          curl -s -X POST "${{ secrets.DOWNLOAD_SITE }}" \
+          curl -L -X POST "${{ secrets.DOWNLOAD_SITE }}" \
             -F "token=${{ secrets.UPLOAD_TOKEN }}" \
-            -F "appID=$app_id" \
+            -F "appID=$APP_ID" \
             -o webapp.zip
 
-          # Check if valid zip file
-          if file webapp.zip | grep -q 'Zip archive data'; then
-            echo "Valid zip file received. Extracting..."
+          if unzip -t webapp.zip >/dev/null 2>&1; then
             mkdir -p decompiled_app/assets/flutter_assets/assets/webapp
             unzip -o webapp.zip -d decompiled_app/assets/flutter_assets/assets/webapp
           else
-            echo "No valid zip file received, skipping extraction."
+            echo "No valid webapp zip."
           fi
 
-      - name: Modify app name in AndroidManifest.xml
+      - name: Modify app label
         run: |
-          if [ -f decompiled_app/AndroidManifest.xml ]; then
-            echo "Modifying AndroidManifest.xml..."
-            xmlstarlet ed --inplace \
-              -N android="http://schemas.android.com/apk/res/android" \
-              -u "/manifest/application/@android:label" \
-              -v "$APP_TITLE" decompiled_app/AndroidManifest.xml
-          else
-            echo "AndroidManifest.xml not found!"
-            exit 1
-          fi
+          xmlstarlet ed --inplace \
+            -N android="http://schemas.android.com/apk/res/android" \
+            -u "/manifest/application/@android:label" \
+            -v "$APP_TITLE" \
+            decompiled_app/AndroidManifest.xml
 
       - name: Rebuild APK
         run: |
           apktool b decompiled_app -o unsigned.apk
 
-      - name: Zipalign APK
+      - name: Zipalign
         run: |
           zipalign -p -f 4 unsigned.apk aligned.apk
 
@@ -103,22 +116,21 @@ jobs:
         run: |
           apksigner sign \
             --ks appvly.jks \
-            --ks-key-alias ${{ secrets.KEY_ALIAS }} \
-            --ks-pass pass:${{ secrets.KEYSTORE_PASS }} \
-            --key-pass pass:${{ secrets.KEY_PASS }} \
+            --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+            --ks-pass pass:"${{ secrets.KEYSTORE_PASS }}" \
+            --key-pass pass:"${{ secrets.KEY_PASS }}" \
             --out final.apk \
             aligned.apk
 
-      - name: Verify APK Signature
+      - name: Verify Signature
         run: |
           apksigner verify final.apk
 
-      - name: Upload APK to your server
+      - name: Upload APK
         run: |
-          app_id=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
-          echo "Using app_id: $app_id"
+          APP_ID=$(jq -r '.appID' decompiled_app/assets/flutter_assets/assets/config.json)
 
-          curl -X POST "${{ secrets.UPLOAD_SITE }}" \
+          curl -L -X POST "${{ secrets.UPLOAD_SITE }}" \
             -F "file=@final.apk" \
             -F "token=${{ secrets.UPLOAD_TOKEN }}" \
-            -F "appID=$app_id"
+            -F "appID=$APP_ID"
